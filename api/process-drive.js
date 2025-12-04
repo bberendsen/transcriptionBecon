@@ -1,151 +1,110 @@
-// pages/api/process-drive.js
-import fs from "fs";
-import path from "path";
-import stream from "stream";
-import { promisify } from "util";
-import axios from "axios";
-import { getDriveClient, getDocsClient } from "../../lib/google";
+import { google } from "googleapis";
 import OpenAI from "openai";
 
-const pipeline = promisify(stream.pipeline);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ======= GOOGLE DRIVE / DOCS SETUP =======
 
-const INPUT_FOLDER = process.env.INPUT_FOLDER_ID;
-const OUTPUT_FOLDER = process.env.OUTPUT_FOLDER_ID;
-const PROCESS_LABEL_KEY = process.env.PROCESS_LABEL_KEY || "processed_by_automation";
+const saJsonStr = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+if (!saJsonStr) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is niet gezet");
 
-/** Helper: list unprocessed mp3 files in folder */
-async function listUnprocessedMp3s(drive) {
-    // 1. Query alle audio-bestanden (niet alleen exact audio/mpeg)
-    const res = await drive.files.list({
-        q: `'${INPUT_FOLDER}' in parents`,
-        fields: "files(id,name,mimeType,appProperties)"
-      });
-      console.log("Drive files:", res.data.files);
-      
-  
-    // 3. Filter bestanden die nog niet verwerkt zijn
-    const files = res.data.files || [];
-    return files.filter(f => !(f.appProperties && f.appProperties[PROCESS_LABEL_KEY] === "true"));
-  }
-  
+const saJson = JSON.parse(saJsonStr);
 
-/** Helper: download file to buffer */
-async function downloadFileToBuffer(drive, fileId) {
-  const res = await drive.files.get({ fileId, alt: "media" }, { responseType: "arraybuffer" });
+const auth = new google.auth.GoogleAuth({
+  credentials: saJson,
+  scopes: [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+  ],
+});
+
+const drive = google.drive({ version: "v3", auth });
+const docs = google.docs({ version: "v1", auth });
+
+// ======= OPENAI SETUP =======
+
+if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is niet gezet");
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// ======= HELPERS =======
+
+async function listAudioFiles(folderId) {
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and mimeType contains 'audio'`,
+    fields: "files(id,name)",
+  });
+  return res.data.files || [];
+}
+
+async function downloadFile(fileId) {
+  const res = await drive.files.get(
+    { fileId, alt: "media" },
+    { responseType: "arraybuffer" }
+  );
   return Buffer.from(res.data);
 }
 
-/** Helper: mark file as processed using appProperties */
-async function markFileProcessed(drive, fileId) {
-  await drive.files.update({
-    fileId,
-    requestBody: {
-      appProperties: {
-        [PROCESS_LABEL_KEY]: "true",
-      }
-    }
+async function createDoc(title, content) {
+  const doc = await docs.documents.create({
+    requestBody: { title },
   });
+
+  await docs.documents.batchUpdate({
+    documentId: doc.data.documentId,
+    requestBody: {
+      requests: [
+        { insertText: { location: { index: 1 }, text: content } },
+      ],
+    },
+  });
+
+  return doc.data.documentId;
 }
 
-/** Helper: upload doc file to drive (we create doc via Docs API then move to folder) */
-async function moveFileToFolder(drive, fileId, folderId) {
-  // Get existing parents, then add the output folder
-  const file = await drive.files.get({ fileId, fields: "parents" });
-  const previousParents = file.data.parents ? file.data.parents.join(",") : "";
-  await drive.files.update({
-    fileId,
-    addParents: folderId,
-    removeParents: previousParents,
-    fields: "id, parents"
+async function summarizeText(text) {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "Je bent een assistent die audio samenvat." },
+      { role: "user", content: text },
+    ],
   });
+
+  return completion.choices[0].message.content;
 }
+
+// ======= VERCEL FUNCTION =======
 
 export default async function handler(req, res) {
-  // optional secret check for cron
-  /*if (process.env.VERCEL_CRON_SECRET) {
-    const secret = req.headers["x-cron-secret"] || req.query.secret;
-    if (secret !== process.env.VERCEL_CRON_SECRET) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-  }*/
-
   try {
-    const drive = getDriveClient();
-    const docs = getDocsClient();
+    const folderId = process.env.INPUT_FOLDER_ID;
+    if (!folderId) throw new Error("INPUT_FOLDER_ID is niet gezet");
 
-    const files = await listUnprocessedMp3s(drive);
+    const files = await listAudioFiles(folderId);
     if (!files.length) return res.status(200).json({ message: "No new files" });
 
     const results = [];
+
     for (const file of files) {
-      const start = Date.now();
-      const buffer = await downloadFileToBuffer(drive, file.id);
+      const audioBuffer = await downloadFile(file.id);
 
-      // Send to Whisper (OpenAI) - transcription
-      // Using createTranscription via OpenAI's "audio" endpoint; we send as multipart/form-data
-      const form = new FormData();
-      form.append("file", buffer, { filename: file.name, contentType: "audio/mpeg" });
-      form.append("model", "whisper-1");
-
-      // openai library doesn't currently support multipart in all versions; we'll use axios to call REST
-      const tResp = await axios.post("https://api.openai.com/v1/audio/transcriptions", form, {
-        headers: {
-          ...form.getHeaders(),
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
+      // Whisper transcription via OpenAI
+      const transcription = await openai.audio.transcriptions.create({
+        file: audioBuffer,
+        model: "whisper-1",
       });
 
-      const transcriptText = tResp.data.text;
+      const summary = await summarizeText(transcription.text);
 
-      // Summarize with Chat Completion (GPT)
-      const prompt = `Vat deze transcript samen in korte bullets (max 8 bullets). Gebruik heldere, zakelijke taal.\n\nTranscript:\n${transcriptText}`;
-      const chatResp = await openai.chat.completions.create
-        ? await openai.chat.completions.create({
-            model: "gpt-4o-mini", // kies een kostenefficient model of "gpt-4.1" als je wilt
-            messages: [{ role: "user", content: prompt }],
-            max_tokens: 400,
-          })
-        : await openai.responses.create({
-            model: "gpt-4o-mini",
-            input: prompt,
-            max_tokens: 400
-          });
+      const docId = await createDoc(`${file.name} transcript`, summary);
 
-      // different clients return differently — normalize:
-      const summary = chatResp?.choices?.[0]?.message?.content || chatResp?.output?.[0]?.content || chatResp?.choices?.[0]?.text || "";
-
-      // Create Google Doc
-      const docCreate = await docs.documents.create({
-        requestBody: { title: `Transcript - ${file.name}` }
-      });
-      const documentId = docCreate.data.documentId;
-
-      // Insert text
-      const insertText = `Bestand: ${file.name}\n\nSamenvatting:\n${summary}\n\nTranscript:\n${transcriptText}`;
-      await docs.documents.batchUpdate({
-        documentId,
-        requestBody: {
-          requests: [
-            { insertText: { location: { index: 1 }, text: insertText } }
-          ]
-        }
-      });
-
-      // Move doc to output folder
-      await moveFileToFolder(drive, documentId, OUTPUT_FOLDER);
-
-      // Mark original mp3 as processed
-      await markFileProcessed(drive, file.id);
-
-      results.push({ file: file.name, documentId, durationMs: Date.now() - start });
+      results.push({ file: file.name, docId });
     }
 
-    res.status(200).json({ processed: results });
+    res.status(200).json({ message: "Done", results });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message });
   }
 }
