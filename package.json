@@ -4,8 +4,6 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
     "start": "node api/process-drive.js"
   },
   "dependencies": {
