@@ -1,0 +1,15 @@
+{
+    "functions": {
+      "api/**/*.js": {
+        "runtime": "nodejs24.x"
+      }
+    },
+    "env": {
+      "NODE_OPTIONS": " --openssl-legacy-provider"
+    },
+    "build": {
+      "env": {
+        "NODE_OPTIONS": " --openssl-legacy-provider"
+      }
+    }
+  }
