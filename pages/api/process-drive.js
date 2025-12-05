@@ -185,30 +185,72 @@ export default async function handler(req, res) {
     }
 
     console.log(`Fetching audio files from input folder: ${inputFolderId}`);
+    
+    // First, verify we can access the folder
+    const drive = getDriveClient();
+    let folderInfo;
+    try {
+      folderInfo = await drive.files.get({
+        fileId: inputFolderId,
+        fields: "id,name,mimeType,permissions",
+      });
+      console.log(`Folder access verified: ${folderInfo.data.name} (${folderInfo.data.id})`);
+    } catch (folderError) {
+      if (folderError.code === 404) {
+        throw new Error(`Folder not found. Please verify INPUT_FOLDER_ID is correct: ${inputFolderId}`);
+      } else if (folderError.code === 403) {
+        // Get service account email for better error message
+        let serviceAccountEmail = "your-service-account@project.iam.gserviceaccount.com";
+        try {
+          if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+            const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+            serviceAccountEmail = saJson.client_email || serviceAccountEmail;
+          }
+        } catch (e) {
+          // If parsing fails, use default message
+        }
+        
+        throw new Error(
+          `Access denied to folder. Please share the folder with the service account email: ${serviceAccountEmail}\n` +
+          `Folder ID: ${inputFolderId}\n` +
+          `To fix: Right-click the folder in Google Drive → Share → Add ${serviceAccountEmail} with Viewer or Editor access`
+        );
+      }
+      throw folderError;
+    }
+    
+    // Try to list ALL files in the folder first (for debugging)
+    const allFilesRes = await drive.files.list({
+      q: `'${inputFolderId}' in parents and trashed=false`,
+      fields: "files(id,name,mimeType,size)",
+      pageSize: 100,
+    });
+    const allFiles = allFilesRes.data.files || [];
+    
+    console.log(`Found ${allFiles.length} total file(s) in folder:`, 
+      allFiles.map(f => ({ name: f.name, mimeType: f.mimeType, size: f.size }))
+    );
+    
+    // Now get audio files specifically
     const files = await listAudioFiles(inputFolderId);
     
-    console.log(`Query returned ${files.length} file(s)`);
+    console.log(`Query returned ${files.length} audio file(s)`);
     
     if (!files.length) {
-      // Also try to list ALL files in the folder for debugging
-      const drive = getDriveClient();
-      const allFilesRes = await drive.files.list({
-        q: `'${inputFolderId}' in parents`,
-        fields: "files(id,name,mimeType)",
-        pageSize: 10,
-      });
-      const allFiles = allFilesRes.data.files || [];
-      
-      console.log(`Debug: Found ${allFiles.length} total file(s) in folder:`, 
-        allFiles.map(f => ({ name: f.name, mimeType: f.mimeType }))
-      );
-      
       return res.status(200).json({ 
         message: "No new audio files found in input folder",
         debug: {
           folderId: inputFolderId,
+          folderName: folderInfo.data.name,
           totalFilesInFolder: allFiles.length,
-          filesInFolder: allFiles.map(f => ({ name: f.name, mimeType: f.mimeType })),
+          filesInFolder: allFiles.map(f => ({ 
+            name: f.name, 
+            mimeType: f.mimeType,
+            size: f.size 
+          })),
+          serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_JSON 
+            ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON).client_email 
+            : "not available",
         },
         results: [] 
       });
