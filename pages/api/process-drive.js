@@ -13,12 +13,45 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ======= HELPERS =======
 async function listAudioFiles(folderId) {
   const drive = getDriveClient();
-  const res = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType contains 'audio'`,
-    fields: "files(id,name,mimeType)",
+  
+  // Query for audio files - try multiple approaches
+  // MP3 files can have different MIME types: audio/mpeg, audio/mp3, audio/x-mpeg, etc.
+  // Also check by file extension as fallback
+  const queries = [
+    // Primary: Check for common audio MIME types
+    `'${folderId}' in parents and (mimeType='audio/mpeg' or mimeType='audio/mp3' or mimeType='audio/x-mpeg' or mimeType='audio/mp4' or mimeType='audio/wav' or mimeType='audio/x-wav' or mimeType='audio/m4a' or mimeType contains 'audio/')`,
+    // Fallback: Check by file extension
+    `'${folderId}' in parents and (name contains '.mp3' or name contains '.wav' or name contains '.m4a' or name contains '.mp4' or name contains '.ogg' or name contains '.flac')`,
+  ];
+  
+  // Try the first query (MIME type based)
+  let res = await drive.files.list({
+    q: queries[0],
+    fields: "files(id,name,mimeType,createdTime)",
     orderBy: "createdTime desc",
+    pageSize: 100,
   });
-  return res.data.files || [];
+  
+  let allFiles = res.data.files || [];
+  
+  // If no files found, try the extension-based query
+  if (allFiles.length === 0) {
+    console.log("No files found with MIME type query, trying extension-based query...");
+    res = await drive.files.list({
+      q: queries[1],
+      fields: "files(id,name,mimeType,createdTime)",
+      orderBy: "createdTime desc",
+      pageSize: 100,
+    });
+    allFiles = res.data.files || [];
+  }
+  
+  // Log what we found for debugging
+  console.log(`Found ${allFiles.length} file(s) in folder ${folderId}:`, 
+    allFiles.map(f => ({ name: f.name, mimeType: f.mimeType, id: f.id }))
+  );
+  
+  return allFiles;
 }
 
 async function downloadFile(fileId) {
@@ -151,12 +184,32 @@ export default async function handler(req, res) {
       throw new Error("OUTPUT_FOLDER_ID is niet gezet");
     }
 
-    console.log("Fetching audio files from input folder...");
+    console.log(`Fetching audio files from input folder: ${inputFolderId}`);
     const files = await listAudioFiles(inputFolderId);
     
+    console.log(`Query returned ${files.length} file(s)`);
+    
     if (!files.length) {
+      // Also try to list ALL files in the folder for debugging
+      const drive = getDriveClient();
+      const allFilesRes = await drive.files.list({
+        q: `'${inputFolderId}' in parents`,
+        fields: "files(id,name,mimeType)",
+        pageSize: 10,
+      });
+      const allFiles = allFilesRes.data.files || [];
+      
+      console.log(`Debug: Found ${allFiles.length} total file(s) in folder:`, 
+        allFiles.map(f => ({ name: f.name, mimeType: f.mimeType }))
+      );
+      
       return res.status(200).json({ 
         message: "No new audio files found in input folder",
+        debug: {
+          folderId: inputFolderId,
+          totalFilesInFolder: allFiles.length,
+          filesInFolder: allFiles.map(f => ({ name: f.name, mimeType: f.mimeType })),
+        },
         results: [] 
       });
     }
