@@ -100,24 +100,67 @@ async function createDoc(title, content, outputFolderId = null) {
   try {
     console.log(`Creating Google Doc with title: "${title}"`);
     
-    // Try to create the document
-    const doc = await docs.documents.create({ 
-      requestBody: { title } 
-    });
+    // Method 1: Try creating document directly via Docs API (original method)
+    let documentId;
+    try {
+      const doc = await docs.documents.create({ 
+        requestBody: { title } 
+      });
+      documentId = doc.data.documentId;
+      console.log(`Google Doc created successfully via Docs API: ${documentId}`);
+    } catch (docsError) {
+      // If Docs API fails, try creating via Drive API
+      console.log(`Docs API creation failed, trying Drive API method...`);
+      console.log(`Docs API error:`, docsError.message);
+      
+      // Method 2: Create document via Drive API (creates in a folder)
+      if (outputFolderId) {
+        try {
+          // Create a Google Doc file in the output folder using Drive API
+          const fileMetadata = {
+            name: title,
+            mimeType: 'application/vnd.google-apps.document',
+            parents: [outputFolderId]
+          };
+          
+          const driveFile = await drive.files.create({
+            requestBody: fileMetadata,
+            fields: 'id, name'
+          });
+          
+          documentId = driveFile.data.id;
+          console.log(`Google Doc created successfully via Drive API: ${documentId}`);
+        } catch (driveError) {
+          console.error(`Drive API creation also failed:`, driveError.message);
+          // If both fail, throw the original Docs API error
+          throw docsError;
+        }
+      } else {
+        // No output folder, so we can't use Drive API method
+        throw docsError;
+      }
+    }
     
-    const documentId = doc.data.documentId;
-    console.log(`Google Doc created successfully: ${documentId}`);
-    
-    // If output folder is specified, move the document there
-    if (outputFolderId) {
+    // If document was created in a folder other than output folder, move it
+    if (outputFolderId && documentId) {
       try {
-        console.log(`Moving document to output folder: ${outputFolderId}`);
-        await drive.files.update({
+        // Check current parents
+        const file = await drive.files.get({
           fileId: documentId,
-          addParents: outputFolderId,
-          fields: "id, parents",
+          fields: "parents",
         });
-        console.log(`Document moved to output folder successfully`);
+        
+        const currentParents = file.data.parents || [];
+        if (!currentParents.includes(outputFolderId)) {
+          console.log(`Moving document to output folder: ${outputFolderId}`);
+          await drive.files.update({
+            fileId: documentId,
+            addParents: outputFolderId,
+            removeParents: currentParents.join(","),
+            fields: "id, parents",
+          });
+          console.log(`Document moved to output folder successfully`);
+        }
       } catch (moveError) {
         console.warn(`Could not move document to output folder (this is optional):`, moveError.message);
         // Don't fail the whole operation if we can't move it
@@ -144,7 +187,8 @@ async function createDoc(title, content, outputFolderId = null) {
     console.error("Error creating Google Doc:", error);
     console.error("Error code:", error.code);
     console.error("Error message:", error.message);
-    console.error("Error response:", error.response?.data);
+    console.error("Error response:", JSON.stringify(error.response?.data, null, 2));
+    console.error("Full error object:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
     
     if (error.code === 403 || error.message.includes('permission') || error.message.includes('Permission')) {
       // Check if it's a specific API error
@@ -154,21 +198,24 @@ async function createDoc(title, content, outputFolderId = null) {
       throw new Error(
         `Permission denied creating Google Doc.\n\n` +
         `Error details: ${reason}\n\n` +
-        `**To fix this:**\n` +
-        `1. Go to https://console.cloud.google.com/iam-admin/iam?project=sound-velocity-480119-g8\n` +
-        `2. Find your service account: ${serviceAccountEmail}\n` +
-        `3. Click the pencil icon to edit roles\n` +
-        `4. Click "ADD ANOTHER ROLE"\n` +
-        `5. Add one of these roles:\n` +
-        `   - "Editor" (full access - recommended)\n` +
-        `   - "Owner" (full access)\n` +
-        `   - Or "Service Account User" + "Service Account Token Creator"\n` +
-        `6. Save the changes\n` +
-        `7. Wait 1-2 minutes for permissions to propagate\n\n` +
-        `**Also verify:**\n` +
-        `- Google Docs API is enabled: https://console.cloud.google.com/apis/library/docs.googleapis.com?project=sound-velocity-480119-g8\n` +
-        `- Google Drive API is enabled: https://console.cloud.google.com/apis/library/drive.googleapis.com?project=sound-velocity-480119-g8\n` +
-        `- The service account is in the correct project: sound-velocity-480119-g8`
+        `**Troubleshooting steps:**\n\n` +
+        `1. **Verify IAM Roles** (most important):\n` +
+        `   - Go to: https://console.cloud.google.com/iam-admin/iam?project=sound-velocity-480119-g8\n` +
+        `   - Find: ${serviceAccountEmail}\n` +
+        `   - Ensure it has "Editor" or "Owner" role\n\n` +
+        `2. **Verify API Enablement:**\n` +
+        `   - Docs API: https://console.cloud.google.com/apis/library/docs.googleapis.com?project=sound-velocity-480119-g8\n` +
+        `   - Drive API: https://console.cloud.google.com/apis/library/drive.googleapis.com?project=sound-velocity-480119-g8\n\n` +
+        `3. **Verify Folder Permissions:**\n` +
+        `   - Make sure the output folder is shared with ${serviceAccountEmail}\n` +
+        `   - Give it "Editor" access (not just Viewer)\n\n` +
+        `4. **Check OAuth Consent Screen:**\n` +
+        `   - Go to: https://console.cloud.google.com/apis/credentials/consent?project=sound-velocity-480119-g8\n` +
+        `   - Make sure OAuth consent screen is configured (even for service accounts)\n\n` +
+        `5. **Try creating a test document manually:**\n` +
+        `   - Share a folder with ${serviceAccountEmail}\n` +
+        `   - Try creating a document in that folder via the API\n\n` +
+        `If all else fails, the service account might need domain-wide delegation (for Workspace accounts) or there may be organization policies blocking API access.`
       );
     }
     
