@@ -7,7 +7,15 @@ export const maxDuration = 300;
 export const runtime = 'nodejs';
 
 // ======= OPENAI SETUP =======
-if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is niet gezet");
+if (!process.env.OPENAI_API_KEY) {
+  throw new Error("OPENAI_API_KEY environment variable is not set. Please add it in Vercel project settings.");
+}
+
+// Validate API key format (should start with sk-)
+if (!process.env.OPENAI_API_KEY.startsWith('sk-')) {
+  throw new Error("OPENAI_API_KEY appears to be invalid. OpenAI API keys should start with 'sk-'. Please check your API key in Vercel project settings.");
+}
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ======= HELPERS =======
@@ -148,7 +156,19 @@ async function transcribeAudio(audioBuffer, fileName) {
     return transcription.text;
   } catch (error) {
     // Provide more helpful error messages
-    if (error.message.includes('file')) {
+    if (error.status === 401 || error.message.includes('API key') || error.message.includes('Incorrect API key')) {
+      throw new Error(
+        `OpenAI API key error: ${error.message}\n\n` +
+        `To fix this:\n` +
+        `1. Go to https://platform.openai.com/account/api-keys\n` +
+        `2. Create a new API key or copy your existing one\n` +
+        `3. In Vercel, go to your project → Settings → Environment Variables\n` +
+        `4. Update the OPENAI_API_KEY variable with the new key\n` +
+        `5. Redeploy or wait for the next deployment\n\n` +
+        `Make sure the API key starts with "sk-" and has no extra spaces or quotes.`
+      );
+    }
+    if (error.message.includes('file') || error.message.includes('format')) {
       throw new Error(`Failed to transcribe audio file "${fileName}": ${error.message}. Ensure the file is a valid audio format.`);
     }
     throw error;
@@ -330,4 +350,3 @@ export default async function handler(req, res) {
     });
   }
 }
-
