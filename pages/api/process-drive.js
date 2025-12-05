@@ -82,16 +82,50 @@ async function downloadFile(fileId) {
   }
 }
 
-async function createDoc(title, content) {
+async function createDoc(title, content, outputFolderId = null) {
   const docs = getDocsClient();
+  const drive = getDriveClient();
+  
+  // Get service account email for error messages
+  let serviceAccountEmail = "your-service-account@project.iam.gserviceaccount.com";
   try {
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      serviceAccountEmail = saJson.client_email || serviceAccountEmail;
+    }
+  } catch (e) {
+    // If parsing fails, use default message
+  }
+  
+  try {
+    console.log(`Creating Google Doc with title: "${title}"`);
+    
+    // Try to create the document
     const doc = await docs.documents.create({ 
       requestBody: { title } 
     });
     
     const documentId = doc.data.documentId;
+    console.log(`Google Doc created successfully: ${documentId}`);
+    
+    // If output folder is specified, move the document there
+    if (outputFolderId) {
+      try {
+        console.log(`Moving document to output folder: ${outputFolderId}`);
+        await drive.files.update({
+          fileId: documentId,
+          addParents: outputFolderId,
+          fields: "id, parents",
+        });
+        console.log(`Document moved to output folder successfully`);
+      } catch (moveError) {
+        console.warn(`Could not move document to output folder (this is optional):`, moveError.message);
+        // Don't fail the whole operation if we can't move it
+      }
+    }
     
     // Insert the transcription text
+    console.log(`Inserting transcription text (${content.length} characters)...`);
     await docs.documents.batchUpdate({
       documentId,
       requestBody: { 
@@ -104,16 +138,45 @@ async function createDoc(title, content) {
       },
     });
     
+    console.log(`Text inserted successfully into document ${documentId}`);
     return documentId;
   } catch (error) {
-    if (error.code === 403 || error.message.includes('permission')) {
+    console.error("Error creating Google Doc:", error);
+    console.error("Error code:", error.code);
+    console.error("Error message:", error.message);
+    console.error("Error response:", error.response?.data);
+    
+    if (error.code === 403 || error.message.includes('permission') || error.message.includes('Permission')) {
+      // Check if it's a specific API error
+      const errorDetails = error.response?.data?.error || {};
+      const reason = errorDetails.message || error.message;
+      
       throw new Error(
-        `Permission denied creating Google Doc. The service account needs Google Docs API access.\n` +
-        `Make sure:\n` +
-        `1. Google Docs API is enabled in your Google Cloud project\n` +
-        `2. The service account has the necessary permissions`
+        `Permission denied creating Google Doc.\n\n` +
+        `Error details: ${reason}\n\n` +
+        `**To fix this:**\n` +
+        `1. Go to https://console.cloud.google.com/iam-admin/iam?project=sound-velocity-480119-g8\n` +
+        `2. Find your service account: ${serviceAccountEmail}\n` +
+        `3. Click the pencil icon to edit roles\n` +
+        `4. Click "ADD ANOTHER ROLE"\n` +
+        `5. Add one of these roles:\n` +
+        `   - "Editor" (full access - recommended)\n` +
+        `   - "Owner" (full access)\n` +
+        `   - Or "Service Account User" + "Service Account Token Creator"\n` +
+        `6. Save the changes\n` +
+        `7. Wait 1-2 minutes for permissions to propagate\n\n` +
+        `**Also verify:**\n` +
+        `- Google Docs API is enabled: https://console.cloud.google.com/apis/library/docs.googleapis.com?project=sound-velocity-480119-g8\n` +
+        `- Google Drive API is enabled: https://console.cloud.google.com/apis/library/drive.googleapis.com?project=sound-velocity-480119-g8\n` +
+        `- The service account is in the correct project: sound-velocity-480119-g8`
       );
     }
+    
+    // Handle other common errors
+    if (error.code === 404) {
+      throw new Error(`Google Docs API endpoint not found. Make sure Google Docs API is enabled.`);
+    }
+    
     throw error;
   }
 }
@@ -344,7 +407,7 @@ export default async function handler(req, res) {
         // Step 3: Create Google Doc with transcription
         console.log("Creating Google Doc...");
         const docTitle = `${file.name.replace(/\.[^/.]+$/, "")} - Transcript`;
-        const docId = await createDoc(docTitle, transcriptionText);
+        const docId = await createDoc(docTitle, transcriptionText, outputFolderId);
 
         // Step 4: Move original file to output folder
         console.log("Moving file to output folder...");
