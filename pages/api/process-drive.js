@@ -64,55 +64,92 @@ async function listAudioFiles(folderId) {
 
 async function downloadFile(fileId) {
   const drive = getDriveClient();
-  const res = await drive.files.get(
-    { fileId, alt: "media" },
-    { responseType: "arraybuffer" }
-  );
-  return Buffer.from(res.data);
+  try {
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    return Buffer.from(res.data);
+  } catch (error) {
+    if (error.code === 403 || error.message.includes('permission')) {
+      throw new Error(
+        `Permission denied downloading file. The service account needs access to the file.\n` +
+        `File ID: ${fileId}\n` +
+        `Make sure the file is in a folder that's shared with the service account.`
+      );
+    }
+    throw error;
+  }
 }
 
 async function createDoc(title, content) {
   const docs = getDocsClient();
-  const doc = await docs.documents.create({ 
-    requestBody: { title } 
-  });
-  
-  const documentId = doc.data.documentId;
-  
-  // Insert the transcription text
-  await docs.documents.batchUpdate({
-    documentId,
-    requestBody: { 
-      requests: [{ 
-        insertText: { 
-          location: { index: 1 }, 
-          text: content 
-        } 
-      }] 
-    },
-  });
-  
-  return documentId;
+  try {
+    const doc = await docs.documents.create({ 
+      requestBody: { title } 
+    });
+    
+    const documentId = doc.data.documentId;
+    
+    // Insert the transcription text
+    await docs.documents.batchUpdate({
+      documentId,
+      requestBody: { 
+        requests: [{ 
+          insertText: { 
+            location: { index: 1 }, 
+            text: content 
+          } 
+        }] 
+      },
+    });
+    
+    return documentId;
+  } catch (error) {
+    if (error.code === 403 || error.message.includes('permission')) {
+      throw new Error(
+        `Permission denied creating Google Doc. The service account needs Google Docs API access.\n` +
+        `Make sure:\n` +
+        `1. Google Docs API is enabled in your Google Cloud project\n` +
+        `2. The service account has the necessary permissions`
+      );
+    }
+    throw error;
+  }
 }
 
 async function moveFileToOutputFolder(fileId, outputFolderId) {
   const drive = getDriveClient();
   
-  // Get the current parents of the file
-  const file = await drive.files.get({
-    fileId,
-    fields: "parents",
-  });
-  
-  const previousParents = file.data.parents.join(",");
-  
-  // Move the file to the output folder
-  await drive.files.update({
-    fileId,
-    addParents: outputFolderId,
-    removeParents: previousParents,
-    fields: "id, parents",
-  });
+  try {
+    // Get the current parents of the file
+    const file = await drive.files.get({
+      fileId,
+      fields: "parents",
+    });
+    
+    const previousParents = file.data.parents.join(",");
+    
+    // Move the file to the output folder
+    await drive.files.update({
+      fileId,
+      addParents: outputFolderId,
+      removeParents: previousParents,
+      fields: "id, parents",
+    });
+  } catch (error) {
+    if (error.code === 403 || error.message.includes('permission')) {
+      throw new Error(
+        `Permission denied moving file to output folder. The service account needs Editor access to:\n` +
+        `1. The file being moved\n` +
+        `2. The output folder (ID: ${outputFolderId})\n\n` +
+        `Make sure:\n` +
+        `- The output folder is shared with the service account with Editor access\n` +
+        `- The file is in a folder shared with the service account with Editor access`
+      );
+    }
+    throw error;
+  }
 }
 
 async function transcribeAudio(audioBuffer, fileName) {
@@ -327,11 +364,28 @@ export default async function handler(req, res) {
         console.log(`✓ Completed: ${file.name}`);
       } catch (fileError) {
         console.error(`Error processing ${file.name}:`, fileError);
+        console.error(`Error stack:`, fileError.stack);
+        console.error(`Error code:`, fileError.code);
+        
+        // Try to identify which step failed based on error message
+        let stepInfo = "Unknown step";
+        if (fileError.message.includes('download') || fileError.message.includes('Download')) {
+          stepInfo = "Step 1: Downloading file";
+        } else if (fileError.message.includes('transcribe') || fileError.message.includes('OpenAI') || fileError.message.includes('API key')) {
+          stepInfo = "Step 2: Transcribing audio";
+        } else if (fileError.message.includes('Doc') || fileError.message.includes('document')) {
+          stepInfo = "Step 3: Creating Google Doc";
+        } else if (fileError.message.includes('move') || fileError.message.includes('output folder')) {
+          stepInfo = "Step 4: Moving file to output folder";
+        }
+        
         results.push({
           fileName: file.name,
           fileId: file.id,
           status: "error",
           error: fileError.message,
+          step: stepInfo,
+          errorCode: fileError.code,
         });
       }
     }
