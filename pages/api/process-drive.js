@@ -102,70 +102,84 @@ async function createDoc(title, content, outputFolderId = null) {
     
     let documentId;
     
-    // Method 1: Try creating document directly in output folder via Drive API (preferred method)
-    // This avoids storage quota issues by creating in a folder the service account has access to
-    if (outputFolderId) {
-      try {
-        console.log(`Attempting to create document in output folder via Drive API...`);
-        // Create a Google Doc file directly in the output folder using Drive API
-        const fileMetadata = {
-          name: title,
-          mimeType: 'application/vnd.google-apps.document',
-          parents: [outputFolderId]
-        };
-        
-        const driveFile = await drive.files.create({
-          requestBody: fileMetadata,
-          fields: 'id, name, parents'
-        });
-        
-        documentId = driveFile.data.id;
-        console.log(`Google Doc created successfully via Drive API in output folder: ${documentId}`);
-      } catch (driveError) {
-        console.log(`Drive API creation failed:`, driveError.message);
-        console.log(`Falling back to Docs API method...`);
-        
-        // Method 2: Fallback to creating via Docs API (creates in service account's Drive)
-        try {
-          const doc = await docs.documents.create({ 
-            requestBody: { title } 
-          });
-          documentId = doc.data.documentId;
-          console.log(`Google Doc created successfully via Docs API: ${documentId}`);
-          
-          // Try to move it to output folder
-          if (outputFolderId) {
-            try {
-              console.log(`Moving document to output folder: ${outputFolderId}`);
-              await drive.files.update({
-                fileId: documentId,
-                addParents: outputFolderId,
-                fields: "id, parents",
-              });
-              console.log(`Document moved to output folder successfully`);
-            } catch (moveError) {
-              console.warn(`Could not move document to output folder:`, moveError.message);
-              // Don't fail - document was created, just not in the right place
-            }
-          }
-        } catch (docsError) {
-          console.error(`Docs API creation also failed:`, docsError.message);
-          // If both fail, throw the Drive API error (more likely to be the real issue)
-          throw new Error(
-            `Failed to create document. Drive API error: ${driveError.message}. ` +
-            `Docs API error: ${docsError.message}. ` +
-            `Make sure the output folder is shared with the service account with Editor access.`
-          );
-        }
-      }
-    } else {
-      // No output folder provided, use Docs API
-      console.log(`No output folder provided, creating via Docs API...`);
+    // Strategy: Create document via Docs API first (this works if permissions are correct)
+    // Then immediately move it to the output folder
+    // This avoids the "storage quota" error that can occur when creating directly in a folder
+    try {
+      console.log(`Creating document via Docs API...`);
       const doc = await docs.documents.create({ 
         requestBody: { title } 
       });
       documentId = doc.data.documentId;
       console.log(`Google Doc created successfully via Docs API: ${documentId}`);
+      
+      // Immediately move it to the output folder (if provided)
+      if (outputFolderId) {
+        try {
+          console.log(`Moving document to output folder: ${outputFolderId}`);
+          // First, get the current parents to remove them
+          const fileInfo = await drive.files.get({
+            fileId: documentId,
+            fields: "parents",
+          });
+          
+          const previousParents = fileInfo.data.parents || [];
+          
+          // Move the file to the output folder
+          await drive.files.update({
+            fileId: documentId,
+            addParents: outputFolderId,
+            removeParents: previousParents.length > 0 ? previousParents.join(",") : undefined,
+            fields: "id, parents",
+          });
+          console.log(`Document moved to output folder successfully`);
+        } catch (moveError) {
+          console.warn(`Could not move document to output folder:`, moveError.message);
+          console.warn(`Document was created but is in service account's Drive. Document ID: ${documentId}`);
+          // Don't fail - document was created, location is secondary
+          // The user can manually move it if needed
+        }
+      }
+    } catch (docsError) {
+      console.error(`Docs API creation failed:`, docsError.message);
+      console.error(`Error code:`, docsError.code);
+      console.error(`Error details:`, docsError.response?.data);
+      
+      // If Docs API fails, try Drive API as fallback
+      if (outputFolderId) {
+        console.log(`Trying Drive API as fallback...`);
+        try {
+          const fileMetadata = {
+            name: title,
+            mimeType: 'application/vnd.google-apps.document',
+            parents: [outputFolderId]
+          };
+          
+          const driveFile = await drive.files.create({
+            requestBody: fileMetadata,
+            fields: 'id, name, parents'
+          });
+          
+          documentId = driveFile.data.id;
+          console.log(`Google Doc created successfully via Drive API: ${documentId}`);
+        } catch (driveError) {
+          console.error(`Drive API creation also failed:`, driveError.message);
+          // Both methods failed - provide detailed error
+          throw new Error(
+            `Failed to create document using both methods.\n\n` +
+            `Docs API error: ${docsError.message}\n` +
+            `Drive API error: ${driveError.message}\n\n` +
+            `**Possible solutions:**\n` +
+            `1. Verify the service account has "Editor" IAM role in Google Cloud Console\n` +
+            `2. Make sure Google Docs API is enabled\n` +
+            `3. Ensure the output folder is shared with the service account with Editor access\n` +
+            `4. Check if there are organization policies blocking API access`
+          );
+        }
+      } else {
+        // No output folder and Docs API failed
+        throw docsError;
+      }
     }
     
     // Verify document is in the output folder (if specified)
