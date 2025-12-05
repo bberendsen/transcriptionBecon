@@ -1,6 +1,11 @@
 import { getDriveClient, getDocsClient } from "../../lib/google.js";
 import OpenAI from "openai";
 
+// ======= VERCEL/NEXT.JS CONFIG =======
+// Set max duration for this API route (5 minutes = 300 seconds)
+export const maxDuration = 300;
+export const runtime = 'nodejs';
+
 // ======= OPENAI SETUP =======
 if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is niet gezet");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
