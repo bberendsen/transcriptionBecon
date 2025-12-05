@@ -189,31 +189,44 @@ export default async function handler(req, res) {
     // First, verify we can access the folder
     const drive = getDriveClient();
     let folderInfo;
+    
+    // Get service account email for error messages
+    let serviceAccountEmail = "your-service-account@project.iam.gserviceaccount.com";
+    try {
+      if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+        const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+        serviceAccountEmail = saJson.client_email || serviceAccountEmail;
+      }
+    } catch (e) {
+      // If parsing fails, use default message
+    }
+    
     try {
       folderInfo = await drive.files.get({
         fileId: inputFolderId,
-        fields: "id,name,mimeType,permissions",
+        fields: "id,name,mimeType,permissions,capabilities",
       });
       console.log(`Folder access verified: ${folderInfo.data.name} (${folderInfo.data.id})`);
     } catch (folderError) {
-      if (folderError.code === 404) {
-        throw new Error(`Folder not found. Please verify INPUT_FOLDER_ID is correct: ${inputFolderId}`);
-      } else if (folderError.code === 403) {
-        // Get service account email for better error message
-        let serviceAccountEmail = "your-service-account@project.iam.gserviceaccount.com";
-        try {
-          if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-            const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-            serviceAccountEmail = saJson.client_email || serviceAccountEmail;
-          }
-        } catch (e) {
-          // If parsing fails, use default message
-        }
+      // 404 can mean either folder doesn't exist OR service account doesn't have access
+      // 403 means explicit access denial
+      if (folderError.code === 404 || folderError.code === 403) {
+        const errorMsg = folderError.code === 404 
+          ? "Folder not found or service account doesn't have access"
+          : "Access denied to folder";
         
         throw new Error(
-          `Access denied to folder. Please share the folder with the service account email: ${serviceAccountEmail}\n` +
+          `${errorMsg}.\n\n` +
           `Folder ID: ${inputFolderId}\n` +
-          `To fix: Right-click the folder in Google Drive → Share → Add ${serviceAccountEmail} with Viewer or Editor access`
+          `Folder URL: https://drive.google.com/drive/folders/${inputFolderId}\n\n` +
+          `**To fix this:**\n` +
+          `1. Open the folder in Google Drive: https://drive.google.com/drive/folders/${inputFolderId}\n` +
+          `2. Click the "Share" button (or right-click → Share)\n` +
+          `3. Add this email address: ${serviceAccountEmail}\n` +
+          `4. Give it at least "Viewer" access (or "Editor" if you want it to move files)\n` +
+          `5. Click "Send" or "Share"\n\n` +
+          `**Important:** The service account email must be added as a collaborator on the folder.\n` +
+          `The folder ID is correct, but the service account cannot see it without being shared.`
         );
       }
       throw folderError;
