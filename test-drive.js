@@ -9,6 +9,11 @@ const saJson = JSON.parse(saJsonStr);
 // Vervang \\n door echte line breaks
 saJson.private_key = saJson.private_key.replace(/\\n/g, '\n');
 
+console.log('Key length:', process.env.PRIVATE_KEY?.length || 'undefined');
+console.log('Key starts with:', process.env.PRIVATE_KEY?.substring(0, 50));
+console.log('Node version:', process.version);
+console.log('OpenSSL version:', require('crypto').getFips() ? 'FIPS' : 'Standard');
+
 // Maak Google Auth client
 const auth = new google.auth.GoogleAuth({
   credentials: saJson,
